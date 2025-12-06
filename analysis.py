@@ -33,6 +33,14 @@ SLA_ORDER = ["لم تتجاوز", "قارب على تجاوز SLA", "تجاوز 
 
 ALLOWED_SOURCES = {"Urbi", "تطبيق بلدي", "توكلنا", "مراكز الاتصال"}
 
+BAD_PHRASES = [
+    "السيارات التالفة",
+    "السيارات المحترقة",
+    "سيارات محترقه",
+    "سيارات محترقة",
+    "مخلفات حوادث السيارات",
+]
+
 
 def _norm_ar(s: str) -> str:
     if not isinstance(s, str):
@@ -112,6 +120,17 @@ def parse_created_col(s):
     return a
 
 
+def find_special_rows(df: pd.DataFrame) -> pd.Series:
+    bad_norm = {_norm_ar(x) for x in BAD_PHRASES}
+    mask_bad = pd.Series(False, index=df.index)
+    for col in df.columns:
+        if df[col].dtype == object:
+            col_norm = df[col].astype(str).map(_norm_ar)
+            for p in bad_norm:
+                mask_bad |= col_norm.str.contains(p, na=False)
+    return mask_bad
+
+
 def preprocess(df: pd.DataFrame, closed_ts: pd.Timestamp):
     idx_created = df.columns.get_loc(COL_CREATED)
 
@@ -125,26 +144,6 @@ def preprocess(df: pd.DataFrame, closed_ts: pd.Timestamp):
     right_cols = list(df.columns[sidx + 1:])
     if right_cols:
         df.drop(columns=right_cols, inplace=True)
-
-    NEW_CLASS_COL = "التصنيف الجديد"
-    BAD_CLASS = "السيارات التالفة"
-
-    rows_before = len(df)
-
-    if NEW_CLASS_COL in df.columns:
-        df = df[
-            df[NEW_CLASS_COL]
-            .astype(str)
-            .map(_norm_ar)
-            != _norm_ar(BAD_CLASS)
-        ].copy()
-
-    rows_after = len(df)
-    deleted = rows_before - rows_after
-
-    df["_deleted_bad_class"] = deleted
-    df["_rows_before_filter"] = rows_before
-    df["_rows_after_filter"] = rows_after
 
     if COL_CLOSED not in df.columns:
         df.insert(idx_created + 1, COL_CLOSED, pd.NaT)
@@ -180,7 +179,6 @@ def preprocess(df: pd.DataFrame, closed_ts: pd.Timestamp):
     return df
 
 
-
 def pivots(df_proc: pd.DataFrame):
     p_open = (
         df_proc.groupby([COL_ADMIN, "_status_canon"])[COL_ID]
@@ -204,7 +202,12 @@ def pivots(df_proc: pd.DataFrame):
 
 
 def build(xls: pd.DataFrame, closed_ts: pd.Timestamp) -> BytesIO:
-    df_all = preprocess(xls.copy(), closed_ts)
+    mask_special = find_special_rows(xls)
+    df_special_raw = xls[mask_special].copy()
+    df_clean_raw = xls[~mask_special].copy()
+
+    df_all = preprocess(df_clean_raw, closed_ts)
+    df_special = preprocess(df_special_raw, closed_ts) if not df_special_raw.empty else pd.DataFrame()
 
     df_ar = df_all[df_all[COL_SOURCE] != "Urbi"].copy()
     p_open_ar, p_sla_ar = pivots(df_ar)
@@ -228,12 +231,17 @@ def build(xls: pd.DataFrame, closed_ts: pd.Timestamp) -> BytesIO:
         p_open_ar.to_excel(w, sheet_name="١- المفتوحة والمعاد فتحها")
         p_sla_ar.to_excel(w, sheet_name="٢- التوصيف")
         p_urbi.to_excel(w, sheet_name="٣- مصادر أخرى", index=urbi_index)
+        if not df_special.empty:
+            df_special.to_excel(w, sheet_name="٤- بلاغات خاصة", index=False)
     out.seek(0)
     return out
 
 
 def get_pivots_for_ppt(xls: pd.DataFrame, closed_ts: pd.Timestamp):
-    df_all = preprocess(xls.copy(), closed_ts)
+    mask_special = find_special_rows(xls)
+    df_clean_raw = xls[~mask_special].copy()
+
+    df_all = preprocess(df_clean_raw, closed_ts)
 
     df_ar = df_all[df_all[COL_SOURCE] != "Urbi"].copy()
     p_open_ar, p_sla_ar = pivots(df_ar)
